@@ -304,6 +304,7 @@ let network = tinyppl_e_of_string
    (return (if r2forward (and (not l1fail) (not l4fail))
                          (and (not l2fail) (not l3fail)))))))))"
 
+
 let () =
   assert (within_epsilon (prob p1 StringMap.empty true) 0.5);
   assert (within_epsilon (prob p2 StringMap.empty true) 0.5)

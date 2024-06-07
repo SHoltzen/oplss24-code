@@ -251,7 +251,7 @@ let print_sexpr_indent s =
 (**********************************************************************************)
 (* s-expression parser for TinyPPL *)
 
-exception Parse_error
+exception Parse_error of string
 
 (** parse an s-expression into a pure tinyppl program *)
 let rec tinyppl_p_of_sexpr (s:sexpr) : pure_e =
@@ -259,14 +259,14 @@ let rec tinyppl_p_of_sexpr (s:sexpr) : pure_e =
   | Atom(s) when s = "true" -> True
   | Atom(s) when s = "false" -> False
   | Atom(s) -> Ident(s)
-  | Expr(Atom(s) :: snd :: []) when s = "!" -> Not(tinyppl_p_of_sexpr snd)
+  | Expr(Atom(s) :: snd :: []) when s = "not" -> Not(tinyppl_p_of_sexpr snd)
   | Expr(Atom(s) :: snd :: thrd :: []) when s = "and" ->
     And(tinyppl_p_of_sexpr snd, tinyppl_p_of_sexpr thrd)
   | Expr(Atom(s) :: snd :: thrd :: []) when s = "or" ->
     Or(tinyppl_p_of_sexpr snd, tinyppl_p_of_sexpr thrd)
   | Expr(Atom(s) :: g :: thn :: els :: []) when s = "if" ->
     Ite(tinyppl_p_of_sexpr g, tinyppl_p_of_sexpr thn, tinyppl_p_of_sexpr els)
-  | _ -> raise Parse_error
+  | _ -> raise (Parse_error (string_of_sexpr [s]))
 
 (** parse a string into a pure tinyppl program *)
 let tinyppl_p_of_string s : pure_e =
@@ -280,7 +280,7 @@ let rec tinyppl_e_of_sexpr (s:sexpr) : expr =
   | Expr(Atom(r) :: e :: []) when r = "return" -> Return(tinyppl_p_of_sexpr e)
   | Expr(Atom(s) :: Atom(x) :: e1 :: e2 :: []) when s = "bind" ->
     Bind(x, tinyppl_e_of_sexpr e1, tinyppl_e_of_sexpr e2)
-  | _ -> raise Parse_error
+  | _ -> raise (Parse_error (string_of_sexpr [s]))
 
 (** parse a string into a tinyppl expression *)
 let tinyppl_e_of_string s : expr =
@@ -294,6 +294,15 @@ let p2 = tinyppl_e_of_string "(bind x (flip 0.5)
                               (bind y (flip 0.4)
                               (bind z (flip 0.6)
                               (return (if x y z)))))"
+
+let network = tinyppl_e_of_string
+  "(bind r2forward (flip 0.5)
+   (bind l1fail (flip 0.02)
+   (bind l2fail (flip 0.02)
+   (bind l3fail (flip 0.02)
+   (bind l4fail (flip 0.02)
+   (return (if r2forward (and (not l1fail) (not l4fail))
+                         (and (not l2fail) (not l3fail)))))))))"
 
 let () =
   assert (within_epsilon (prob p1 StringMap.empty true) 0.5);

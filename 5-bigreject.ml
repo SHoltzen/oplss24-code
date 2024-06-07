@@ -1,4 +1,8 @@
-(** a very expressive PPL: all the features you want! *)
+(** a very expressive PPL: all the features you want!
+    this language has mutable state, references, random sampling, general
+    recursion, etc.
+*)
+
 type expr =
   | True
   | False
@@ -11,81 +15,135 @@ type expr =
   | Lt of expr * expr
   | Lam of string * expr
   | App of expr * expr
+  | Ref of expr
+  | Deref of expr
+  | Set of expr * expr
   | Let of string * expr * expr
+  | Begin of expr list
   | Letrec of { binding: string; lam_arg: string; lam_body: expr; body: expr }
   | Ident of string
   | Flip of float
   | Observe of expr * expr
+
+type loc = int
 
 module StringMap = Map.Make(String)
 
 type value =
   | VInt of int
   | VBool of bool
+  | VLoc of int
   | VLam of ( value StringMap.t) * string * expr
 
 type env = value StringMap.t
 
-let rec sample (env:env) (e:expr) : value option =
+type store = {
+  table: (loc, value) Hashtbl.t;
+  next_free: int ref
+}
+
+let new_store () = { table = Hashtbl.create 100; next_free = ref 0 }
+
+let fresh_loc (s:store) : loc =
+  let l = !(s.next_free) in
+  s.next_free := l + 1;
+  l
+
+let set_store (s:store) l v = Hashtbl.add s.table l v
+
+let get_store (s:store) l = Hashtbl.find s.table l
+
+exception Runtime of string
+
+let rec sample (s:store) (env:env) (e:expr) : value option =
   match e with
   | True -> Some(VBool(true))
   | False -> Some(VBool(false))
   | Num(n) -> Some(VInt(n))
-  | Ident(x) -> StringMap.find_opt x env
+  | Ident(x) ->
+    (match StringMap.find_opt x env with
+     | Some(v) -> Some(v)
+     | None -> raise (Runtime(Format.sprintf "ident not found: %s" x)))
   | And(e1, e2) ->
-    (match (sample env e1, sample env e2) with
+    (match (sample s env e1, sample s env e2) with
      | Some(VBool(b1)), Some(VBool(b2)) -> Some(VBool(b1 && b2))
      | _ -> None)
   | Or(e1, e2) ->
-    (match (sample env e1, sample env e2) with
+    (match (sample s env e1, sample s env e2) with
      | Some(VBool(b1)), Some(VBool(b2)) -> Some(VBool(b1 || b2))
      | _ -> None)
   | Not(e1) ->
-    (match sample env e1 with
+    (match sample s env e1 with
      | Some(VBool(b1)) -> Some(VBool(not b1))
      | _ -> None)
   | Ite(g, thn, els) ->
-    (match (sample env g, sample env thn, sample env els) with
+    (match (sample s env g, sample s env thn, sample s env els) with
      | Some(VBool(sg)), Some(VBool(sthn)), Some(VBool(sels)) ->
        Some(VBool(if sg then sthn else sels))
      | _ -> None)
   | Plus(e1, e2) ->
-    (match (sample env e1, sample env e2) with
+    (match (sample s env e1, sample s env e2) with
      | Some(VInt(b1)), Some(VInt(b2)) -> Some(VInt(b1 + b2))
      | _ -> None)
   | Lt(e1, e2) ->
-    (match (sample env e1, sample env e2) with
+    (match (sample s env e1, sample s env e2) with
      | Some(VInt(b1)), Some(VInt(b2)) -> Some(VBool(b1 < b2))
      | _ -> None)
   | Lam(x, body) -> Some(VLam(env, x, body))
   | App(e1, e2) ->
-    (match sample env e1, sample env e2 with
+    (match sample s env e1, sample s env e2 with
      | Some(VLam(closure, x, body)), Some(v2) ->
        let new_env = StringMap.add x v2 closure in
-       sample new_env body
+       sample s new_env body
      | _ -> None)
+  | Ref(e) ->
+    Option.bind (sample s env e) (fun v ->
+        let l = fresh_loc s in
+        set_store s l v;
+        Some(VLoc(l)))
+  | Deref(e) ->
+    (match sample s env e with
+     | Some(VLoc(l)) -> Some(get_store s l)
+     | _ -> None )
+  | Set(e1, e2) ->
+    (match (sample s env e1), (sample s env e2) with
+     | Some(VLoc(l)), Some(v) -> set_store s l v; Some(VBool(true))
+     | _ -> None)
+  | Begin([hd]) -> sample s env hd
+  | Begin(e :: rst) ->
+    Option.bind (sample s env e) (fun _ -> sample s env (Begin(rst)))
+  | Begin([]) -> raise (Runtime("invalid begin with no body"))
   | Let(x, e1, e2) ->
-    (match sample env e1 with
+    (match sample s env e1 with
      | Some(v) ->
        let new_env = StringMap.add x v env in
-       sample new_env e2
+       sample s new_env e2
      | _ -> None )
   | Letrec {binding; lam_arg; lam_body; body} ->
-    let rec_env = StringMap.add binding (VLam(env, lam_arg, lam_body)) env in
-    let new_env = StringMap.add binding (VLam(rec_env, lam_arg, lam_body)) env in
-    sample new_env body
+    (* implement letrec using Landin's knot *)
+    (* for example:
+       letrec f (fun x -> f x) (f true)
+       -- macro expands to -->
+       let tmp = ref 0 in
+       let f = fun x -> (!tmp) x in
+       tmp := f;
+       f true
+    *)
+    (* letrec foo (lam x . e1) e2 -->
+       let foo =  *)
+    failwith "todo"
   | Flip(f) ->
     if (Random.float 1.0 < f) then Some(VBool(true)) else Some(VBool(false))
   | Observe(e1, e2) ->
-    (match sample env e1 with
-     | Some(VBool(true)) -> sample env e2
+    (match sample s env e1 with
+     | Some(VBool(true)) -> sample s env e2
      | _ -> None)
 
 let estimate (e:expr) (v:value) (num_samples: int) : float =
   let count = ref 0.0 in
   let accepted = ref 0.0 in
   for _ = 0 to num_samples do
-    match sample (StringMap.empty) e with
+    match sample (new_store ()) (StringMap.empty) e with
     | Some(sampled_v) ->
       accepted := !accepted +. 1.0;
       if sampled_v = v then count := !count +. 1.0 else ()
@@ -346,9 +404,9 @@ let p5 = e_of_string "(let x (lam y (flip 0.2))
 let p6 = e_of_string "(letrec geom (lam x (if (flip 0.5) (+ 1 (geom true)) 1))
                          (let sum (geom true) (< sum 4)))"
 
-
 let () =
   assert (within_epsilon (estimate p1 (VBool(true)) 10000) 0.5);
   assert (within_epsilon (estimate p2 (VBool(true)) 10000) 0.5);
   assert (within_epsilon (estimate p3 (VBool(true)) 30000) 0.666666);
+  assert (within_epsilon (estimate p4 (VBool(true)) 30000) 0.2);
   assert (within_epsilon (estimate p5 (VBool(true)) 30000) 0.04)

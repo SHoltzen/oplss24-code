@@ -81,17 +81,29 @@ let bdd_var (tbl: bdd_table) (topvar: int) : bdd_ptr =
   assert (topvar < !(tbl.num_vars));
   get_or_insert tbl (Node { topvar = topvar; low = true_ptr; high = false_ptr})
 
+let topvar (tbl: bdd_table) (f: bdd_ptr) =
+  match deref_bdd tbl f with
+  | Node { topvar; low=_; high=_ } -> topvar
+  | _ -> failwith "Tried to call topvar on non-node"
 
 (** negate a BDD *)
-let rec neg (tbl:bdd_table) (f:bdd_ptr) : bdd_ptr =
-  match deref_bdd tbl f with
-  | True -> false_ptr
-  | False -> true_ptr
-  | Node { topvar; low; high } ->
-    get_or_insert tbl (Node { topvar; low = neg tbl low; high = neg tbl high})
+let rec bdd_neg (tbl:bdd_table) (f:bdd_ptr) : bdd_ptr =
+  let rec neg_h memo tbl f =
+    match Hashtbl.find_opt memo f with
+    | Some(v) -> v
+    | None ->
+      let r = (match deref_bdd tbl f with
+      | True -> false_ptr
+      | False -> true_ptr
+      | Node { topvar; low; high } ->
+        get_or_insert tbl (Node { topvar; low = bdd_neg tbl low; high = bdd_neg tbl high})) in
+      Hashtbl.add memo f r;
+      r in
+  neg_h (Hashtbl.create 100) tbl f
 
 (** conjoin together two BDDs *)
 let rec bdd_and (tbl:bdd_table) (f:bdd_ptr) (g:bdd_ptr) : bdd_ptr =
+  (* TODO caching *)
   match (deref_bdd tbl f), (deref_bdd tbl g) with
   | _, False
   | False, _ -> false_ptr
@@ -114,14 +126,19 @@ let rec bdd_and (tbl:bdd_table) (f:bdd_ptr) (g:bdd_ptr) : bdd_ptr =
       let h = bdd_and tbl f g_high in
       if l = h then l else get_or_insert tbl (Node { topvar = g_topvar; low = l; high = h})
 
+let rec bdd_or (tbl: bdd_table) (f:bdd_ptr) (g:bdd_ptr) : bdd_ptr =
+  (* compute disjunction via DeMorgan's law for or *)
+  let negf = bdd_neg tbl f in
+  let negg = bdd_neg tbl g in
+  bdd_neg tbl (bdd_and tbl negf negg)
 
-(* some simple tests *)
+(* some basic tests *)
 let () =
   (* test for canonicity of negation *)
   let tbl = fresh_bdd_table () in
   let b1 = fresh_var tbl in
-  let b1n = neg tbl b1 in
-  let b2n = neg tbl b1 in
+  let b1n = bdd_neg tbl b1 in
+  let b2n = bdd_neg tbl b1 in
   assert (b1n = b2n)
 
 let () =
@@ -132,3 +149,146 @@ let () =
   let a2 = bdd_var tbl 0 in
   let b2 = bdd_var tbl 1 in
   assert (bdd_and tbl a b = bdd_and tbl b2 a2)
+
+let () =
+  (* test for unsat case *)
+  let tbl = fresh_bdd_table () in
+  let a = fresh_var tbl in
+  assert ((bdd_and tbl a (bdd_neg tbl a)) = false_ptr)
+
+let () =
+  (* test for valid case *)
+  let tbl = fresh_bdd_table () in
+  let a = fresh_var tbl in
+  assert ((bdd_or tbl a (bdd_neg tbl a)) = true_ptr)
+
+
+type weight = { low_w:float; high_w:float }
+
+type wmc_params =
+  {
+    weights: (int, weight) Hashtbl.t;
+    one: float;
+    zero: float;
+  }
+
+(** perform an unsmoothed weighted model counting: weights must
+    sum to unity *)
+let wmc (tbl:bdd_table) (w:wmc_params) (f:bdd_ptr) : float =
+  let rec wmc_h (memo: (bdd_ptr, float) Hashtbl.t) tbl w f =
+    match Hashtbl.find_opt memo f with
+    | Some(v) -> v
+    | None ->
+      let r = (match deref_bdd tbl f with
+      | True -> w.one
+      | False -> w.zero
+      | Node { topvar; low; high } ->
+        let { low_w; high_w } = Hashtbl.find (w.weights) topvar in
+        let low_wmc = wmc_h memo tbl w low in
+        let high_wmc = wmc_h memo tbl w high in
+        (low_w *. low_wmc) +. (high_w *. high_wmc)
+        ) in
+      Hashtbl.add memo f r;
+      r in
+  wmc_h (Hashtbl.create 100) tbl w f
+
+(* some testing *)
+let within_epsilon a b = Float.abs (a -. b) < 0.0001
+
+let () =
+  let tbl = fresh_bdd_table () in
+  let a = fresh_var tbl in
+  let b = fresh_var tbl in
+  let c = fresh_var tbl in
+  let disj = bdd_or tbl a (bdd_or tbl b c) in
+  let w = { low_w = 0.5; high_w = 0.5} in
+  let params = {
+    weights = Hashtbl.of_seq (List.to_seq [(0, w); (1, w); (2, w)]);
+    one = 1.0;
+    zero = 0.0
+  } in
+  assert (within_epsilon (wmc tbl params disj) 0.875)
+
+(**********************************************************************************)
+(* tiny dice *)
+
+type pure_e =
+  | And of pure_e * pure_e
+  | Or of pure_e * pure_e
+  | Not of pure_e
+  | Ident of string
+  | Ite of pure_e * pure_e * pure_e
+  | True
+  | False
+
+(** tinyppl probabilistic expressions *)
+type expr =
+  | Flip       of float
+  | Bind       of string * expr * expr
+  | Return     of pure_e
+
+module StringMap = Map.Make(String)
+
+(* map identifiers to propositional variables *)
+type env = bdd_ptr StringMap.t
+
+let rec compile_p (tbl:bdd_table) (env:env) (e:pure_e) : bdd_ptr =
+  match e with
+  | True -> true_ptr
+  | False -> false_ptr
+  | Ident(s) -> StringMap.find s env
+  | And(e1, e2) ->
+    let c1 = compile_p tbl env e1 in
+    let c2 = compile_p tbl env e2 in
+    bdd_and tbl c1 c2
+  | Or(e1, e2) ->
+    let c1 = compile_p tbl env e1 in
+    let c2 = compile_p tbl env e2 in
+    bdd_or tbl c1 c2
+  | Not(e) ->
+    bdd_neg tbl (compile_p tbl env e)
+  | Ite(g, thn, els) ->
+    let cg = compile_p tbl env g in
+    let cthn = compile_p tbl env thn in
+    let cels = compile_p tbl env els in
+    bdd_and tbl (bdd_or tbl cg cthn) (bdd_or tbl (bdd_neg tbl cg) cels)
+
+let rec compile_e (tbl:bdd_table) (w:wmc_params) (env:env) (e:expr) : bdd_ptr =
+  match e with
+  | Flip(f) ->
+    let v = fresh_var tbl in
+    let weight = { low_w = f; high_w = 1.0 -. f } in
+    Hashtbl.add (w.weights) (topvar tbl v) weight;
+    v
+  | Bind(x, e1, e2) ->
+    let c1 = compile_e tbl w env e1 in
+    let new_env = StringMap.add x c1 env in
+    compile_e tbl w new_env e2
+  | Return(e) -> compile_p tbl env e
+
+let prob (e:expr) : float =
+  let tbl = fresh_bdd_table () in
+  let params = {
+    weights = Hashtbl.create 100;
+    one = 1.0;
+    zero = 0.0
+  } in
+  let compiled = compile_e tbl params StringMap.empty e in
+  wmc tbl params compiled
+
+(* some small examples *)
+let within_epsilon a b = Float.abs (a -. b) < 0.0001
+
+let prog1 = Flip 0.5
+
+let prog2 = Bind("x", Flip(0.5), Return(Ident("x")))
+
+let prog3 = Bind("x", Flip(0.5),
+                 Bind("y", Flip(0.3),
+                      Bind("z", Flip(0.7),
+                           Return(Ite(Ident("x"), Ident("y"), Ident("z"))))))
+
+let () =
+  assert (within_epsilon (prob prog1) 0.5);
+  assert (within_epsilon (prob prog2) 0.5);
+  assert (within_epsilon (prob prog3) 0.5)

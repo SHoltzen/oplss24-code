@@ -1,0 +1,9 @@
+(menhir
+ (modules parser))
+
+(ocamllex lexer)
+
+(library
+ (preprocess (pps ppx_jane))
+ (libraries core bignum sexplib core_unix.command_unix gsl)
+ (name cont))

@@ -1,0 +1,28 @@
+(lang dune 3.9)
+
+(name cont)
+
+(generate_opam_files true)
+
+(using menhir 2.1)
+
+(source
+ (github username/reponame))
+
+(authors "Steven Holtzen")
+
+(maintainers "Steven Holtzen")
+
+(license LICENSE)
+
+(documentation https://url/to/documentation)
+
+(package
+ (name cont)
+ (synopsis "Cont: A Simple Continuous PPL")
+ (description "")
+ (depends ocaml dune core menhir ounit qcheck bignum core_unix gsl)
+ (tags
+  (topics "to describe" your project)))
+
+; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project

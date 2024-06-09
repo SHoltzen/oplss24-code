@@ -1,0 +1,4 @@
+x <- unif;
+y <- unif;
+return (x + y < 1.0)
+

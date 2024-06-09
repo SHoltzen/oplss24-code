@@ -1,0 +1,6 @@
+(executable
+ (public_name cont)
+ (name main)
+ (preprocess (pps ppx_jane))
+ (libraries cont core bignum sexplib core_unix.command_unix))
+

@@ -1,4 +1,4 @@
-(** tinydisc language *)
+(** pure language *)
 type pure_e =
   | And of pure_e * pure_e
   | Or of pure_e * pure_e

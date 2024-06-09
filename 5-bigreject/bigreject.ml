@@ -419,10 +419,13 @@ let p5 = e_of_string "(let x (lam y (flip 0.2))
                             (let f2 (x true)
                               (and f1 f2))))"
 
+
 let p6 = e_of_string "(letrec geom (lam x (if (flip 0.5) (+ 1 (geom true)) 1))
                          (let sum (geom true) (< sum 4)))"
 
 let p7 = e_of_string "(letrec foo (lam x (if false (foo (+ x 1)) x)) (foo 100))"
+
+let p8 = e_of_string "(let x (ref 0) )"
 
 let () =
   assert (within_epsilon (estimate p1 (VBool(true)) 10000) 0.5);

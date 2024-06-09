@@ -10,10 +10,10 @@ type pure_e =
 
 (** core grammar type *)
 type expr =
-  | Flip       of float
-  | Bind       of string * expr * expr
-  | Return     of pure_e
-  | Observe    of pure_e * expr
+  | Flip of float
+  | Bind of string * expr * expr
+  | Return of pure_e
+  | Observe of pure_e * expr
 
 module StringMap = Map.Make(String)
 
@@ -37,30 +37,88 @@ let rec pure_eval (e:pure_e) (env:env) : bool =
      | Some(v) -> v
      | None -> raise Runtime)
 
-(** given an expression `e` and environment `env`, compute the probability
-    that `e` evaluates to `v` *)
-let rec prob (e:expr) (env:env) (v:bool) : float =
-  match e with
-  | Flip(f) -> if v then f else (1.0 -. f)
-  | Bind(x, e1, e2) ->
-    let true_env = StringMap.add x true env in
-    let false_env = StringMap.add x false env in
-    let prob_e1_t = prob e1 env true in
-    let prob_e1_f = prob e1 env false in
-    (prob_e1_t *. (prob e2 true_env v)) +. (prob_e1_f *. (prob e2 false_env v))
-  | Return(p) ->
-    if (pure_eval p env) = v then 1.0 else 0.0
-  | Observe(p, e) ->
-    if (pure_eval p env) then prob e env v else 0.0
+type trace = bool list
 
-let infer (e:expr) (v:bool) : float =
-  let prob_t = prob e (StringMap.empty) true in
-  let prob_f = prob e (StringMap.empty) false in
-  let z = prob_t +. prob_f in
-  if v then prob_t /. z else prob_f /. z
+type traced_sample = {
+  remaining_trace: trace;
+  new_trace: trace;
+  sampled_v: bool;
+  prob: float
+}
+
+let new_traced_sample remaining_trace new_trace sampled_v prob =
+  { remaining_trace; new_trace; sampled_v; prob }
+
+(** given an expression `e` and environment `env`, propose a new sample drawn from `e` *)
+let rec propose (trace:trace) (env:env) (e:expr) : traced_sample =
+  match e with
+  | Flip(f) ->
+    (* if the trace is empty, sample as normal; otherwise, follow the trace *)
+    (match trace with
+     | s :: tl ->
+       let p = if s then f else 1.0 -. f in
+       new_traced_sample tl [s] s p
+     | [] ->
+       let s = if (Random.float 1.0) < f then true else false in
+       let p = if s then f else 1.0 -. f in
+       new_traced_sample [] [s] s p)
+  | Bind(x, e1, e2) ->
+    let t1 = propose trace env e1 in
+    let new_env = StringMap.add x (t1.sampled_v) env in
+    let t2 = propose t1.remaining_trace new_env e2 in
+    new_traced_sample t2.remaining_trace
+      (List.append t1.new_trace t2.new_trace) t2.sampled_v (t1.prob *. t2.prob)
+  | Observe(e1, e2) ->
+    let se2 = propose trace env e2 in
+    if (pure_eval e1 env) then se2 else new_traced_sample se2.remaining_trace se2.new_trace se2.sampled_v 0.0
+  | Return(p) ->
+    new_traced_sample trace [] (pure_eval p env) 1.0
+
+(** get a sublist of list between low (inclusive) and high (exclusive) *)
+let sublist list low high =
+  List.filteri (fun i _ -> i >= low && i < high) list
+
+(** perform one step of metropolis hastings *)
+let mh_step (cur_trace:traced_sample) (e:expr) : traced_sample =
+  (* choose a random subset of the existing trace as a proposal *)
+  (* let cut_point = Random.int (List.length cur_trace.new_trace) in *)
+  (* let new_trace = sublist cur_trace.new_trace 0 cut_point in *)
+  let new_s = propose [] (StringMap.empty) e in
+  (* let new_s = propose new_trace (StringMap.empty) e in *)
+  if cur_trace.prob < 0.000001 then (* accept new trace *) new_s else
+    let ratio = Float.min 1.0 (new_s.prob /. cur_trace.prob) in
+    let accept = Random.float 1.0 < ratio in
+    if accept then new_s else cur_trace
+
+
+(* use the expectation estimator to estimate the probability that `e` evaluates
+   to `v` using `num_samples` *)
+let estimate (v:bool) (num_samples: int) (lag : int) (e:expr) : float =
+  let count = ref 0.0 in
+  let cur_samp : traced_sample ref = ref (propose [] StringMap.empty e) in
+  for _ = 0 to num_samples do
+    (* step until lag *)
+    for _ = 0 to lag do
+      cur_samp := mh_step !cur_samp e;
+    done;
+    if (!cur_samp).sampled_v = v then count := (!count) +. 1.0 else ()
+  done;
+  (!count /. (float_of_int num_samples))
+
+
+let ex_prog = Bind("x", Flip(0.3),
+                  Bind("y", Flip(0.4),
+                      Return(And(Ident("x"), Ident("y")))))
+
+(* some example runs:
+   > estimate (Flip 0.4) true 1000;;
+   - : float = 0.381
+   estimate ex_prog true 100;;
+   - : float = 0.13
+*)
 
 (* some small examples *)
-let within_epsilon a b = Float.abs (a -. b) < 0.0001
+let within_epsilon a b = Float.abs (a -. b) < 0.01
 
 let prog1 = Flip 0.5
 
@@ -76,12 +134,13 @@ let prog4 = Bind("x", Flip(0.5),
                       Observe(Or(Ident("x"), Ident("y")),
                               Return(Ident("x")))))
 
-
 let () =
-  assert (within_epsilon (infer prog1 true) 0.5);
-  assert (within_epsilon (infer prog2 true) 0.5);
-  assert (within_epsilon (infer prog3 true) 0.5);
-  assert (within_epsilon (infer prog4 true) 0.666666)
+  (* these assertions will fail (with small probability)! *)
+  assert (within_epsilon (estimate prog1 true 10000) 0.5);
+  assert (within_epsilon (estimate prog2 true 10000) 0.5);
+  assert (within_epsilon (estimate prog3 true 10000) 0.5);
+  assert (within_epsilon (estimate prog4 true 100000) 0.666666)
+
 
 (**********************************************************************************)
 (** This module is a very simple parsing library for S-expressions. *)
@@ -263,9 +322,9 @@ let print_sexpr_indent s =
   print_endline (string_of_sexpr_indent s)
 
 (**********************************************************************************)
-(* s-expression parser for TinyPPL *)
+(* s-expression parser *)
 
-exception Parse_error of string
+exception Parse_error
 
 (** parse an s-expression into a pure tinyppl program *)
 let rec tinyppl_p_of_sexpr (s:sexpr) : pure_e =
@@ -280,7 +339,7 @@ let rec tinyppl_p_of_sexpr (s:sexpr) : pure_e =
     Or(tinyppl_p_of_sexpr snd, tinyppl_p_of_sexpr thrd)
   | Expr(Atom(s) :: g :: thn :: els :: []) when s = "if" ->
     Ite(tinyppl_p_of_sexpr g, tinyppl_p_of_sexpr thn, tinyppl_p_of_sexpr els)
-  | _ -> raise (Parse_error(string_of_sexpr [s]))
+  | _ -> raise Parse_error
 
 (** parse a string into a pure tinyppl program *)
 let tinyppl_p_of_string s : pure_e =
@@ -296,7 +355,7 @@ let rec tinyppl_e_of_sexpr (s:sexpr) : expr =
     Bind(x, tinyppl_e_of_sexpr e1, tinyppl_e_of_sexpr e2)
   | Expr(Atom(s) :: e1 :: e2 :: []) when s = "observe" ->
     Observe(tinyppl_p_of_sexpr e1, tinyppl_e_of_sexpr e2)
-  | _ -> raise (Parse_error(string_of_sexpr [s]))
+  | _ -> raise Parse_error
 
 (** parse a string into a tinyppl expression *)
 let tinyppl_e_of_string s : expr =
@@ -317,6 +376,6 @@ let p3 = tinyppl_e_of_string "(bind x (flip 0.5)
                               (return x))))"
 
 let () =
-  assert (within_epsilon (infer p1 true) 0.5);
-  assert (within_epsilon (infer p2 true) 0.5);
-  assert (within_epsilon (infer p3 true) 0.666666)
+  assert (within_epsilon (estimate p1 true 10000) 0.5);
+  assert (within_epsilon (estimate p2 true 10000) 0.5);
+  assert (within_epsilon (estimate p3 true 10000) 0.666666)

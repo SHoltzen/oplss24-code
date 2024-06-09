@@ -53,6 +53,12 @@ let set_store (s:store) l v = Hashtbl.add s.table l v
 
 let get_store (s:store) l = Hashtbl.find s.table l
 
+let cur_c = ref 0
+
+let fresh_name () =
+  cur_c := !cur_c + 1;
+  Format.sprintf "fresh_%d" !cur_c
+
 exception Runtime of string
 
 let rec sample (s:store) (env:env) (e:expr) : value option =
@@ -80,15 +86,18 @@ let rec sample (s:store) (env:env) (e:expr) : value option =
     (match (sample s env g, sample s env thn, sample s env els) with
      | Some(VBool(sg)), Some(VBool(sthn)), Some(VBool(sels)) ->
        Some(VBool(if sg then sthn else sels))
-     | _ -> None)
+     | None, _, _ | _, None, _ | _, _, None -> None
+     | _ -> failwith "Type error")
   | Plus(e1, e2) ->
     (match (sample s env e1, sample s env e2) with
      | Some(VInt(b1)), Some(VInt(b2)) -> Some(VInt(b1 + b2))
-     | _ -> None)
+     | (None, _) | (_, None) -> None
+     | _ -> failwith "type error")
   | Lt(e1, e2) ->
     (match (sample s env e1, sample s env e2) with
      | Some(VInt(b1)), Some(VInt(b2)) -> Some(VBool(b1 < b2))
-     | _ -> None)
+     | (None, _) | (_, None) -> None
+     | _ -> failwith "type error")
   | Lam(x, body) -> Some(VLam(env, x, body))
   | App(e1, e2) ->
     (match sample s env e1, sample s env e2 with
@@ -107,8 +116,11 @@ let rec sample (s:store) (env:env) (e:expr) : value option =
      | _ -> None )
   | Set(e1, e2) ->
     (match (sample s env e1), (sample s env e2) with
-     | Some(VLoc(l)), Some(v) -> set_store s l v; Some(VBool(true))
-     | _ -> None)
+     | Some(VLoc(l)), Some(v) ->
+       set_store s l v;
+       Some(VBool(true))
+     | _, None | None, _ -> None
+     | _ -> failwith "Type error")
   | Begin([hd]) -> sample s env hd
   | Begin(e :: rst) ->
     Option.bind (sample s env e) (fun _ -> sample s env (Begin(rst)))
@@ -125,13 +137,19 @@ let rec sample (s:store) (env:env) (e:expr) : value option =
        letrec f (fun x -> f x) (f true)
        -- macro expands to -->
        let tmp = ref 0 in
-       let f = fun x -> (!tmp) x in
+       let f = fun x -> !tmp x in
+       let f = fun x -> f x in
        tmp := f;
        f true
     *)
-    (* letrec foo (lam x . e1) e2 -->
-       let foo =  *)
-    failwith "todo"
+    (* store in the environment a lambda that invokes the reference *)
+    let tmp = fresh_name () in
+    let new_term = Let(tmp, Ref(Num(0)),
+                      Let(binding, Lam("x", App(Deref(Ident(tmp)), Ident("x"))),
+                         Let(binding, Lam(lam_arg, lam_body),
+                            Begin([Set(Ident(tmp), Ident(binding));
+                                   body])))) in
+    sample s env new_term
   | Flip(f) ->
     if (Random.float 1.0 < f) then Some(VBool(true)) else Some(VBool(false))
   | Observe(e1, e2) ->
@@ -403,6 +421,8 @@ let p5 = e_of_string "(let x (lam y (flip 0.2))
 
 let p6 = e_of_string "(letrec geom (lam x (if (flip 0.5) (+ 1 (geom true)) 1))
                          (let sum (geom true) (< sum 4)))"
+
+let p7 = e_of_string "(letrec foo (lam x (if false (foo (+ x 1)) x)) (foo 100))"
 
 let () =
   assert (within_epsilon (estimate p1 (VBool(true)) 10000) 0.5);

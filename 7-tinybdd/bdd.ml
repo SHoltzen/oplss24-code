@@ -103,28 +103,36 @@ let rec bdd_neg (tbl:bdd_table) (f:bdd_ptr) : bdd_ptr =
 
 (** conjoin together two BDDs *)
 let rec bdd_and (tbl:bdd_table) (f:bdd_ptr) (g:bdd_ptr) : bdd_ptr =
-  (* TODO caching *)
-  match (deref_bdd tbl f), (deref_bdd tbl g) with
-  | _, False
-  | False, _ -> false_ptr
-  | True, True -> true_ptr
-  | True, Node { topvar; high; low } -> g
-  | Node { topvar; high; low }, True -> f
-  | Node { topvar=f_topvar; low=f_low; high=f_high },
-    Node { topvar=g_topvar; low=g_low; high=g_high } when f_topvar = g_topvar ->
-    let l = bdd_and tbl f_low g_low in
-    let h = bdd_and tbl f_high g_high in
-    if l = h then l else get_or_insert tbl (Node { topvar = f_topvar; low = l; high = h})
-  | Node { topvar=f_topvar; low=f_low; high=f_high },
-    Node { topvar=g_topvar; low=g_low; high=g_high } ->
-    if f_topvar < g_topvar then
-      let l = bdd_and tbl f_low g in
-      let h = bdd_and tbl f_high g in
-      if l = h then l else get_or_insert tbl (Node { topvar = f_topvar; low = l; high = h})
-    else
-      let l = bdd_and tbl f g_low in
-      let h = bdd_and tbl f g_high in
-      if l = h then l else get_or_insert tbl (Node { topvar = g_topvar; low = l; high = h})
+  (* check for cached BDD *)
+  match Hashtbl.find_opt tbl.memo_table (f, g) with
+  | Some(v) -> v
+  | None ->
+    (* no cached BDD, compute conjunction *)
+    let r = (match (deref_bdd tbl f), (deref_bdd tbl g) with
+        | _, False
+        | False, _ -> false_ptr
+        | True, True -> true_ptr
+        | True, Node { topvar; high; low } -> g
+        | Node { topvar; high; low }, True -> f
+        | Node { topvar=f_topvar; low=f_low; high=f_high },
+          Node { topvar=g_topvar; low=g_low; high=g_high } when f_topvar = g_topvar ->
+          let l = bdd_and tbl f_low g_low in
+          let h = bdd_and tbl f_high g_high in
+          if l = h then l else get_or_insert tbl (Node { topvar = f_topvar; low = l; high = h})
+        | Node { topvar=f_topvar; low=f_low; high=f_high },
+          Node { topvar=g_topvar; low=g_low; high=g_high } ->
+          if f_topvar < g_topvar then
+            let l = bdd_and tbl f_low g in
+            let h = bdd_and tbl f_high g in
+            if l = h then l else get_or_insert tbl (Node { topvar = f_topvar; low = l; high = h})
+          else
+            let l = bdd_and tbl f g_low in
+            let h = bdd_and tbl f g_high in
+            if l = h then l else get_or_insert tbl (Node { topvar = g_topvar; low = l; high = h})) in
+
+    (* cache the conjunction *)
+    Hashtbl.add tbl.memo_table (f, g) r;
+    r
 
 let rec bdd_or (tbl: bdd_table) (f:bdd_ptr) (g:bdd_ptr) : bdd_ptr =
   (* compute disjunction via DeMorgan's law for or *)
@@ -161,7 +169,6 @@ let () =
   let tbl = fresh_bdd_table () in
   let a = fresh_var tbl in
   assert ((bdd_or tbl a (bdd_neg tbl a)) = true_ptr)
-
 
 type weight = { low_w:float; high_w:float }
 
@@ -548,7 +555,6 @@ let big_prog = tinyppl_e_of_string
      (bind x (flip 0.5)
      (return x)))))))))))))))))))))))))))"
 
-
 let network = tinyppl_e_of_string
   "(bind r2forward (flip 0.5)
    (bind l1fail (flip 0.02)
@@ -557,7 +563,6 @@ let network = tinyppl_e_of_string
    (bind l4fail (flip 0.02)
    (return (if r2forward (and (not l1fail) (not l4fail))
                          (and (not l2fail) (not l3fail)))))))))"
-
 
 let () =
   assert (within_epsilon (prob p1) 0.5);

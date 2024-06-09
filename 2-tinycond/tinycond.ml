@@ -13,6 +13,7 @@ type expr =
   | Flip       of float
   | Bind       of string * expr * expr
   | Return     of pure_e
+  | Observe    of pure_e * expr
 
 module StringMap = Map.Make(String)
 
@@ -36,40 +37,30 @@ let rec pure_eval (e:pure_e) (env:env) : bool =
      | Some(v) -> v
      | None -> raise Runtime)
 
-(** given an expression `e` and environment `env`, draw a sample from `e` *)
-let rec sample (e:expr) (env:env) : bool =
+(** given an expression `e` and environment `env`, compute the probability
+    that `e` evaluates to `v` *)
+let rec prob (e:expr) (env:env) (v:bool) : float =
   match e with
-  | Flip(f) -> if (Random.float 1.0) < f then true else false
+  | Flip(f) -> if v then f else (1.0 -. f)
   | Bind(x, e1, e2) ->
-    let v1 = sample e1 env in
-    let new_env = StringMap.add x v1 env in
-    sample e2 new_env
-  | Return(p) -> pure_eval p env
+    let true_env = StringMap.add x true env in
+    let false_env = StringMap.add x false env in
+    let prob_e1_t = prob e1 env true in
+    let prob_e1_f = prob e1 env false in
+    (prob_e1_t *. (prob e2 true_env v)) +. (prob_e1_f *. (prob e2 false_env v))
+  | Return(p) ->
+    if (pure_eval p env) = v then 1.0 else 0.0
+  | Observe(p, e) ->
+    if (pure_eval p env) then prob e env v else 0.0
 
-(* use the expectation estimator to estimate the probability that `e` evaluates
-   to `v` using `num_samples` *)
-let estimate (e:expr) (v:bool) (num_samples: int) : float =
-  let count = ref 0.0 in
-  for _ = 0 to num_samples do
-    let sampled_v = sample e (StringMap.empty) in
-    if sampled_v = v then count := !count +. 1.0 else ()
-  done;
-  (!count /. (float_of_int num_samples))
-
-
-let ex_prog = Bind("x", Flip(0.3),
-                  Bind("y", Flip(0.4),
-                      Return(And(Ident("x"), Ident("y")))))
-
-(* some example runs:
-   > estimate (Flip 0.4) true 1000;;
-   - : float = 0.381
-   estimate ex_prog true 100;;
-   - : float = 0.13
-*)
+let infer (e:expr) (v:bool) : float =
+  let prob_t = prob e (StringMap.empty) true in
+  let prob_f = prob e (StringMap.empty) false in
+  let z = prob_t +. prob_f in
+  if v then prob_t /. z else prob_f /. z
 
 (* some small examples *)
-let within_epsilon a b = Float.abs (a -. b) < 0.01
+let within_epsilon a b = Float.abs (a -. b) < 0.0001
 
 let prog1 = Flip 0.5
 
@@ -80,12 +71,17 @@ let prog3 = Bind("x", Flip(0.5),
                       Bind("z", Flip(0.7),
                            Return(Ite(Ident("x"), Ident("y"), Ident("z"))))))
 
-let () =
-  (* these assertions will fail (with small probability)! *)
-  assert (within_epsilon (estimate prog1 true 10000) 0.5);
-  assert (within_epsilon (estimate prog2 true 10000) 0.5);
-  assert (within_epsilon (estimate prog3 true 10000) 0.5)
+let prog4 = Bind("x", Flip(0.5),
+                 Bind("y", Flip(0.5),
+                      Observe(Or(Ident("x"), Ident("y")),
+                              Return(Ident("x")))))
 
+
+let () =
+  assert (within_epsilon (infer prog1 true) 0.5);
+  assert (within_epsilon (infer prog2 true) 0.5);
+  assert (within_epsilon (infer prog3 true) 0.5);
+  assert (within_epsilon (infer prog4 true) 0.666666)
 
 (**********************************************************************************)
 (** This module is a very simple parsing library for S-expressions. *)
@@ -267,9 +263,9 @@ let print_sexpr_indent s =
   print_endline (string_of_sexpr_indent s)
 
 (**********************************************************************************)
-(* s-expression parser *)
+(* s-expression parser for TinyPPL *)
 
-exception Parse_error
+exception Parse_error of string
 
 (** parse an s-expression into a pure tinyppl program *)
 let rec tinyppl_p_of_sexpr (s:sexpr) : pure_e =
@@ -284,7 +280,7 @@ let rec tinyppl_p_of_sexpr (s:sexpr) : pure_e =
     Or(tinyppl_p_of_sexpr snd, tinyppl_p_of_sexpr thrd)
   | Expr(Atom(s) :: g :: thn :: els :: []) when s = "if" ->
     Ite(tinyppl_p_of_sexpr g, tinyppl_p_of_sexpr thn, tinyppl_p_of_sexpr els)
-  | _ -> raise Parse_error
+  | _ -> raise (Parse_error(string_of_sexpr [s]))
 
 (** parse a string into a pure tinyppl program *)
 let tinyppl_p_of_string s : pure_e =
@@ -298,7 +294,9 @@ let rec tinyppl_e_of_sexpr (s:sexpr) : expr =
   | Expr(Atom(r) :: e :: []) when r = "return" -> Return(tinyppl_p_of_sexpr e)
   | Expr(Atom(s) :: Atom(x) :: e1 :: e2 :: []) when s = "bind" ->
     Bind(x, tinyppl_e_of_sexpr e1, tinyppl_e_of_sexpr e2)
-  | _ -> raise Parse_error
+  | Expr(Atom(s) :: e1 :: e2 :: []) when s = "observe" ->
+    Observe(tinyppl_p_of_sexpr e1, tinyppl_e_of_sexpr e2)
+  | _ -> raise (Parse_error(string_of_sexpr [s]))
 
 (** parse a string into a tinyppl expression *)
 let tinyppl_e_of_string s : expr =
@@ -313,6 +311,46 @@ let p2 = tinyppl_e_of_string "(bind x (flip 0.5)
                               (bind z (flip 0.6)
                               (return (if x y z)))))"
 
+let p3 = tinyppl_e_of_string "(bind x (flip 0.5)
+                              (bind y (flip 0.5)
+                              (observe (or x y)
+                              (return x))))"
+
+let diagnosis = tinyppl_e_of_string
+    "(bind has_covid (flip 0.01)
+     (bind test_pos_with_covid (flip 0.99)
+     (bind test_pos_no_covid (flip 0.05)
+     (bind test (return (if has_covid test_pos_with_covid test_pos_no_covid))
+     (observe test
+     (return has_covid))))))"
+
+let big_program = tinyppl_e_of_string
+  "(bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (bind x (flip 0.5)
+   (return x))))))))))))))))))))))))"
+
 let () =
-  assert (within_epsilon (estimate p1 true 10000) 0.5);
-  assert (within_epsilon (estimate p2 true 10000) 0.5)
+  assert (within_epsilon (infer p1 true) 0.5);
+  assert (within_epsilon (infer p2 true) 0.5);
+  assert (within_epsilon (infer p3 true) 0.666666)
